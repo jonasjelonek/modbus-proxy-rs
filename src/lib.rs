@@ -145,6 +145,12 @@ impl Device {
             match message {
                 Message::Connection => {
                     nb_clients += 1;
+                    if !self.is_connected() {
+                        if let Err(_) = self.connect().await {
+                            error!("failed to connect to Modbus device");
+                        }
+                    }
+
                     info!("new client connection (active = {})", nb_clients);
                 }
                 Message::Disconnection => {
