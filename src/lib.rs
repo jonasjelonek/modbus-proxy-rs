@@ -6,6 +6,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
+use std::net::SocketAddr;
 
 // Use Jemalloc only for musl-64 bits platforms
 //#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
@@ -17,8 +18,8 @@ type ReplySender = oneshot::Sender<Frame>;
 
 #[derive(Debug)]
 enum Message {
-    Connection,
-    Disconnection,
+    Connection(SocketAddr),
+    Disconnection(SocketAddr),
     Packet(Frame, ReplySender),
 }
 
@@ -143,7 +144,7 @@ impl Device {
 
         while let Some(message) = channel.recv().await {
             match message {
-                Message::Connection => {
+                Message::Connection(ip) => {
                     nb_clients += 1;
                     if !self.is_connected() {
                         if let Err(_) = self.connect().await {
@@ -151,11 +152,11 @@ impl Device {
                         }
                     }
 
-                    info!("new client connection (active = {})", nb_clients);
+                    info!("new client connection from {} (active = {})", ip, nb_clients);
                 }
-                Message::Disconnection => {
+                Message::Disconnection(ip) => {
                     nb_clients -= 1;
-                    info!("client disconnection (active = {})", nb_clients);
+                    info!("client {} disconnection (active = {})", ip, nb_clients);
                     if nb_clients == 0 {
                         info!("disconnecting from modbus at {} (no clients)", self.url);
                         self.disconnect();
@@ -206,12 +207,13 @@ impl Bridge {
     }
 
     async fn handle_client(client: TcpStream, channel: ChannelTx) -> Result<()> {
+        let cl_addr = client.peer_addr().unwrap();
         client.set_nodelay(true)?;
-        channel.send(Message::Connection).await?;
+        channel.send(Message::Connection(cl_addr)).await?;
 
         let result = Self::client_loop(client, &channel).await;
 
-        channel.send(Message::Disconnection).await?;
+        channel.send(Message::Disconnection(cl_addr)).await?;
 
         result
     }
