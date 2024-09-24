@@ -48,13 +48,24 @@ async fn create_connection(url: &str) -> Result<(TcpReader, TcpWriter)> {
 }
 
 async fn read_frame(stream: &mut TcpReader) -> Result<Frame> {
-    let mut buf = vec![0u8; 6];
-    // Read header
-    stream.read_exact(&mut buf).await?;
-    // calculate payload size
-    let total_size = 6 + frame_size(&buf)?;
+    const HEADER_SIZE: usize = 6;
+
+    trace!("In read_frame");
+    let mut buf = vec![0u8; HEADER_SIZE];
+    let len = stream.read(&mut buf[..]).await?;
+    debug!("read_frame: read {} bytes for header", len);
+    if len < HEADER_SIZE {
+        return Err("no or invalid response".into());
+    }
+
+    let total_size = HEADER_SIZE + frame_size(&buf)?;
+    trace!("read_frame: expecting {} bytes", total_size);
+
     buf.resize(total_size, 0);
-    stream.read_exact(&mut buf[6..total_size]).await?;
+    
+    let read = stream.read_exact(&mut buf[HEADER_SIZE..total_size]).await?;
+    trace!("read {} response bytes", read);
+    
     Ok(buf)
 }
 
@@ -112,28 +123,26 @@ impl Device {
     }
 
     async fn write_read(&mut self, frame: &Frame) -> Result<Frame> {
-        if self.is_connected() {
-            let result = self.raw_write_read(&frame).await;
-            match result {
-                Ok(reply) => Ok(reply),
-                Err(error) => {
-                    warn!("modbus error: {}. Retrying...", error);
-                    self.connect().await?;
-                    self.raw_write_read(&frame).await
-                }
-            }
-        } else {
+        if !self.is_connected() {
             self.connect().await?;
-            self.raw_write_read(&frame).await
+        }
+
+        match self.raw_write_read(&frame).await {
+            Ok(reply) => Ok(reply),
+            Err(err) => {
+                warn!("modbus error: {}. Retrying...", err);
+
+                self.raw_write_read(&frame).await
+            }
         }
     }
 
     async fn handle_packet(&mut self, frame: Frame, channel: ReplySender) -> Result<()> {
         info!("modbus request {}: {} bytes", self.url, frame.len());
-        debug!("modbus request {}: {:?}", self.url, &frame[..]);
+
         let reply = self.write_read(&frame).await?;
+
         info!("modbus reply {}: {} bytes", self.url, reply.len());
-        debug!("modbus reply {}: {:?}", self.url, &reply[..]);
         channel
             .send(reply)
             .or_else(|error| Err(format!("error sending reply to client: {:?}", error).into()))
@@ -147,9 +156,7 @@ impl Device {
                 Message::Connection(ip) => {
                     nb_clients += 1;
                     if !self.is_connected() {
-                        if let Err(_) = self.connect().await {
-                            error!("failed to connect to Modbus device");
-                        }
+                        let _ = self.connect().await;
                     }
 
                     info!("new client connection from {} (active = {})", ip, nb_clients);
@@ -198,6 +205,7 @@ impl Bridge {
         loop {
             let (client, _) = listener.accept().await.unwrap();
             let tx = tx.clone();
+
             tokio::spawn(async move {
                 if let Err(err) = Self::handle_client(client, tx).await {
                     error!("Client error: {:?}", err);
