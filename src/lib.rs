@@ -1,11 +1,14 @@
 #[macro_use]
 extern crate log;
 
+use std::net::SocketAddr;
+
 use futures::future::join_all;
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{self, Duration};
 
 // Use Jemalloc only for musl-64 bits platforms
 //#[cfg(all(target_env = "musl", target_pointer_width = "64"))]
@@ -17,9 +20,9 @@ type ReplySender = oneshot::Sender<Frame>;
 
 #[derive(Debug)]
 enum Message {
-    Connection,
-    Disconnection,
-    Packet(Frame, ReplySender),
+    Connection(SocketAddr),
+    Disconnection(SocketAddr),
+    Packet(Frame, ReplySender, SocketAddr),
 }
 
 type ChannelRx = mpsc::Receiver<Message>;
@@ -30,6 +33,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 type TcpReader = BufReader<tokio::net::tcp::OwnedReadHalf>;
 type TcpWriter = BufWriter<tokio::net::tcp::OwnedWriteHalf>;
+
+const TCP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn frame_size(frame: &[u8]) -> Result<usize> {
     Ok(u16::from_be_bytes(frame[4..6].try_into()?) as usize)
@@ -106,8 +111,11 @@ impl Device {
     async fn raw_write_read(&mut self, frame: &Frame) -> Result<Frame> {
         let (reader, writer) = self.stream.as_mut().ok_or("no modbus connection")?;
         writer.write_all(&frame).await?;
+        trace!("[raw_write_read]: wrote packet to stream");
         writer.flush().await?;
-        read_frame(reader).await
+        read_frame(reader).await.inspect(|_| {
+            trace!("[raw_write_read]: read response from stream");
+        })
     }
 
     async fn write_read(&mut self, frame: &Frame) -> Result<Frame> {
@@ -143,7 +151,7 @@ impl Device {
 
         while let Some(message) = channel.recv().await {
             match message {
-                Message::Connection => {
+                Message::Connection(ip) => {
                     nb_clients += 1;
                     if !self.is_connected() {
                         if let Err(_) = self.connect().await {
@@ -151,17 +159,18 @@ impl Device {
                         }
                     }
 
-                    info!("new client connection (active = {})", nb_clients);
+                    info!("new client {} connection (active = {})", ip, nb_clients);
                 }
-                Message::Disconnection => {
+                Message::Disconnection(ip) => {
                     nb_clients -= 1;
-                    info!("client disconnection (active = {})", nb_clients);
+                    info!("client {} disconnection (active = {})", ip, nb_clients);
                     if nb_clients == 0 {
-                        info!("disconnecting from modbus at {} (no clients)", self.url);
+                        info!("client disconnecting from modbus at {} (no clients)", self.url);
                         self.disconnect();
                     }
                 }
-                Message::Packet(frame, channel) => {
+                Message::Packet(frame, channel, ip) => {
+                    debug!("[Device::run]: handling packet from {}", ip);
                     if let Err(_) = self.handle_packet(frame, channel).await {
                         self.disconnect();
                     }
@@ -201,27 +210,35 @@ impl Bridge {
                 if let Err(err) = Self::handle_client(client, tx).await {
                     error!("Client error: {:?}", err);
                 }
+                trace!("End of client task");
             });
         }
     }
 
     async fn handle_client(client: TcpStream, channel: ChannelTx) -> Result<()> {
+        let ip = client.peer_addr().unwrap();
         client.set_nodelay(true)?;
-        channel.send(Message::Connection).await?;
+        channel.send(Message::Connection(ip)).await?;
+        trace!("[handle_client]: handling client {}", ip);
 
         let result = Self::client_loop(client, &channel).await;
 
-        channel.send(Message::Disconnection).await?;
+        trace!("[handle_client]: finished client {}", ip);
+        channel.send(Message::Disconnection(ip)).await?;
 
         result
     }
 
     async fn client_loop(client: TcpStream, channel: &ChannelTx) -> Result<()> {
+        let ip = client.peer_addr().unwrap();
         let (mut reader, mut writer) = split_connection(client);
         while let Ok(buf) = read_frame(&mut reader).await {
+            trace!("[client_loop]: packet from {}", ip);
             let (tx, rx) = oneshot::channel();
-            channel.send(Message::Packet(buf, tx)).await?;
+            channel.send(Message::Packet(buf, tx, ip)).await?;
+            trace!("[client_loop]: sent message to device handler");
             writer.write_all(&rx.await?).await?;
+            trace!("[client_loop]: wrote back result");
             writer.flush().await?;
         }
         Ok(())
