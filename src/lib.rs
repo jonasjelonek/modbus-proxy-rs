@@ -62,6 +62,13 @@ async fn read_frame(stream: &mut TcpReader) -> Result<Frame> {
     Ok(buf)
 }
 
+async fn read_frame_with_timeout(stream: &mut TcpReader, timeout: Duration) -> Result<Frame> {
+    time::timeout(timeout, read_frame(stream))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "recv() timed out"))?
+        .map_err(|e| e.into())
+}
+
 #[derive(Debug, Deserialize)]
 struct Listen {
     bind: String,
@@ -113,7 +120,7 @@ impl Device {
         writer.write_all(&frame).await?;
         trace!("[raw_write_read]: wrote packet to stream");
         writer.flush().await?;
-        read_frame(reader).await.inspect(|_| {
+        read_frame_with_timeout(reader, TCP_READ_TIMEOUT).await.inspect(|_| {
             trace!("[raw_write_read]: read response from stream");
         })
     }
