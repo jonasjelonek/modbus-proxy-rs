@@ -18,7 +18,7 @@ maintenance = { status = "experimental" }
 
 [dependencies]
 tokio = { version = "1.40", features = ["rt", "net", "macros", "io-util", "sync", "time"] }
-structopt = "0.3"
+clap = { version = "4.5", features = [ "cargo", "derive" ] }
 log = "0.4"
 env_logger = "0.11"
 config = "0.14"

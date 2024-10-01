@@ -1,16 +1,13 @@
-use structopt::StructOpt;
+use clap::{arg, command, Parser};
 
 use modbus_proxy_rs::Server;
 
-#[derive(Debug, StructOpt)]
-#[structopt(
-    name = "modbus proxy",
-    about = "Connect multiple clients to modbus devices"
-)]
-struct CmdLine {
-    #[structopt(
-        short = "c",
-        long = "config-file",
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Options {
+    #[arg(
+        short = 'c',
+        long = "config",
         help = "configuration file (accepts YAML, TOML, JSON)"
     )]
     config_file: String,
@@ -19,7 +16,7 @@ struct CmdLine {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::init();
-    let args = CmdLine::from_args();
+    let args = Options::parse();
     if let Err(error) = Server::launch(&args.config_file).await {
         eprintln!("Configuration error: {}", error)
     }
